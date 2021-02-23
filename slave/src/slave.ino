@@ -15,17 +15,20 @@
 
 /* macros --------------------------------------------------------------------*/
 
-#define GET_SENSORS_TIME    2000    /*!< */
-#define SAMPLES_NUMBER      10      /*!< */
+#define GET_SENSORS_TIME    3000    /*!< */
+#define SEND_TIME           60000
+#define SAMPLES_NUMBER      SEND_TIME / GET_SENSORS_TIME    /*!< */
 
 #define UBIDOTS_TOKEN       "BBFF-IqtgnnPsgEM8emrSyayEzf9SEPfmdP"   /*!<  */
-#define UBIDOTS_ID          "BBFF-8cfcac286a3d68dc293682fd2e8a0f886e0"  /*!<  */
-#define UBIDOTS_DEVICE_LABEL    "smart_plug"
+// #define UBIDOTS_ID          "BBFF-8cfcac286a3d68dc293682fd2e8a0f886e0"  /*!<  */
+#define UBIDOTS_DEVICE_LABEL    "device_2"
 
 #define MAX_DELAY           0xFFFFFFFF                  /*!< Maximum delay value */
 
 #define BUTTON_PIN          D3  /* Button pin */
-#define POLLING_BUTTON      10  /* BUtton polling time in ms */
+#define POLLING_ACTIVATOR      10  /* BUtton polling time in ms */
+
+#define DHT_PIN             A5  /* DHT sensor pin */
 
 /* typedef -------------------------------------------------------------------*/
 
@@ -50,6 +53,7 @@ typedef struct
 static void app_sensors(void * arg);
 static void app_manager(void * arg);
 static void app_activator(void * arg);
+static void app_response(void * arg);
 
 /* Extern events */
 
@@ -68,6 +72,7 @@ sensors_t sensors;
 debounce_t button;
 
 /* RTOS data */
+os_thread_t activator_handle;
 os_queue_t manager_queue;
 
 /* setup ---------------------------------------------------------------------*/
@@ -79,9 +84,9 @@ void setup()
 
     /* Initialize serial monitor */
     Serial.begin();
-    Serial.println("");
 
     /* Initialize componentes instances */
+    sensors_init(&sensors, DHT_PIN);
     debounce_init(&button, button_callback, BUTTON_PIN, 1);
 
     /**/
@@ -89,8 +94,8 @@ void setup()
 
     /* Initialize RTOS functionalities */
     os_thread_create(NULL, "Sensors Task", OS_THREAD_PRIORITY_DEFAULT + 1, app_sensors, (void *)&sensors, OS_THREAD_STACK_SIZE_DEFAULT);
-    os_thread_create(NULL, "Activator Task", OS_THREAD_PRIORITY_DEFAULT + 2, app_activator, (void *)&button, OS_THREAD_STACK_SIZE_DEFAULT);
-    os_thread_create(NULL, "Manager Task", OS_THREAD_PRIORITY_DEFAULT + 3, app_manager, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
+    os_thread_create(&activator_handle, "Activator Task", OS_THREAD_PRIORITY_DEFAULT + 3, app_activator, (void *)&button, OS_THREAD_STACK_SIZE_DEFAULT);
+    os_thread_create(NULL, "Manager Task", OS_THREAD_PRIORITY_DEFAULT + 2, app_manager, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
 }
 
 /* infinite Loop -------------------------------------------------------------*/
@@ -130,7 +135,8 @@ static void app_sensors(void * arg)
 static void app_manager(void * arg)
 {
     app_t queue;
-    sensors_values_t array[SAMPLES_NUMBER];  /* TODO: obtain the number with macros */
+    sensors_values_t samples[SAMPLES_NUMBER];  /* TODO: obtain the number with macros */
+    uint8_t samples_counter = 0;
 
     for(;;)
     {
@@ -144,6 +150,41 @@ static void app_manager(void * arg)
                 {
                     sensors_values_t * sensors_values = (sensors_values_t *)queue.data;
 
+                    /* Print data received */
+                    Serial.print("temp: ");
+                    Serial.println(sensors_values->temp);
+                    Serial.print("hum: ");
+                    Serial.println(sensors_values->hum);
+
+                    /* Add sensors values samples to buffer */
+                    samples[samples_counter++] = * sensors_values;
+
+                    /* Send to Ubidots every SAMPLES_NUMBER samples obtained */
+                    if(samples_counter == SAMPLES_NUMBER)
+                    {
+                        /* Average temp and hum samples */
+                        float temp_average = 0;
+                        float hum_average = 0;
+
+                        for(uint8_t i = 0; i < samples_counter; i++)
+                        {
+                            temp_average += samples[i].temp;
+                            hum_average += samples[i].hum;
+                        }
+
+                        temp_average = temp_average / samples_counter;
+                        hum_average = hum_average / samples_counter;
+
+                        /* Prepare and send data to Ubidots */
+                        ubidots.add("temp", temp_average);
+                        ubidots.add("hum", hum_average);
+
+                        ubidots.send(UBIDOTS_DEVICE_LABEL);
+
+                        /* Reset samples_counter variable */
+                        samples_counter = 0;
+                    }
+
                     break;
                 }
 
@@ -151,31 +192,14 @@ static void app_manager(void * arg)
                 {
                     Serial.println("Button pressed!");
                     
-                    char * voltage_str = (char *)malloc(sizeof(char) * 15);
-                    char * current_str = (char *)malloc(sizeof(char) * 15);
-                    char * status_str = (char *)malloc(sizeof(char) * 15);
-
-                    sprintf(voltage_str, "120");
-                    sprintf(current_str, "1");
-                    sprintf(status_str, "1");
-
-                    // ubidots.addContext("voltage", voltage_str);
-                    // ubidots.addContext("current", current_str);
-                    // ubidots.addContext("status", status_str);
-
-                    ubidots.add("voltage", 220);
-                    ubidots.add("current", 2);
-                    ubidots.add("status", 0);
-                   
-
+                    ubidots.add("state", TRUE);
                     ubidots.send(UBIDOTS_DEVICE_LABEL);
 
-                    free(voltage_str);
-                    free(current_str);
-                    free(status_str);
+                    os_thread_create(NULL, "Response Task", OS_THREAD_PRIORITY_DEFAULT + 4, app_response, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
+
+                    os_thread_exit(activator_handle);
 
                     break;
-
                 }
 
                 /* Add more cases here */
@@ -210,8 +234,21 @@ static void app_activator(void * arg)
             button_flag = 0;    /* todo: clear if master response is received */
         }
 
-        /* Wait for POLLING_BUTTON */
-        os_thread_delay_until(&last_wake_time, POLLING_BUTTON);
+        /* Wait for POLLING_ACTIVATOR */
+        os_thread_delay_until(&last_wake_time, POLLING_ACTIVATOR);
+    }
+}
+
+static void app_response(void * arg)
+{
+    system_tick_t last_wake_time = 0;
+
+    for(;;)
+    {
+        Serial.println("waiting...");
+
+        /* Wait for ... */
+        os_thread_delay_until(&last_wake_time, 5000);
     }
 }
 
