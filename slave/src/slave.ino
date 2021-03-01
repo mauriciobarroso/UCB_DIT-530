@@ -20,7 +20,6 @@
 #define SAMPLES_NUMBER          SEND_TIME / GET_SENSORS_TIME    /*!< */
 
 #define UBIDOTS_TOKEN           "BBFF-IqtgnnPsgEM8emrSyayEzf9SEPfmdP"   /*!<  */
-// #define UBIDOTS_ID          "BBFF-8cfcac286a3d68dc293682fd2e8a0f886e0"  /*!<  */
 #define UBIDOTS_SLAVE_LABEL     "device_1"
 #define UBIDOTS_MASTER_LABEL    "master"
 
@@ -38,6 +37,7 @@ typedef enum
 {
     SENSORS_DATA = 0,   /*!< Sensors data type */
     ACTIVATOR_DATA,     /*!< Pointer to data */
+    RESPONSE_DATA,
     /* Add more data types here */
 } data_type_e;
 
@@ -50,13 +50,15 @@ typedef struct
 /* FSM */
 typedef enum
 {
-    STOP_STATE,     /*!< Pointer to data */
-    READY_STATE,    /*!< Pointer to data */
-    RUNNING_STATE   /*!< Pointer to data */
+    INITIAL_STATE = 0,
+    STOP_STATE,         /*!< Pointer to data */
+    READY_STATE,        /*!< Pointer to data */
+    RUNNING_STATE       /*!< Pointer to data */
 } fsm_state_e;
 
 typedef enum
 {
+    INITIAL_EVENT = 0,
     ACTIVATOR_EVENT,    /*!< Pointer to data */
     ENABLE_EVENT,       /*!< Pointer to data */
     ALARM_EVENT         /*!< Pointer to data */
@@ -81,19 +83,19 @@ static void app_response(void * arg);
 static void app_fsm(void * arg);
 
 /* Utilities */
-static void average_samples(void);  /* todo: implement */
 static void button_callback(void);
 
 /* FSM functions */
 fsm_state_e activator_handler(void);
 fsm_state_e enable_handler(void);
 fsm_state_e alarm_handler(void);
-fsm_state_e error_handler(void);
 
 /* data declaration ----------------------------------------------------------*/
 
+/**/
 bool button_flag = 0;
 
+/* Ubidots instance */
 Ubidots ubidots(UBIDOTS_TOKEN, UBI_INDUSTRIAL, UBI_HTTP);
 
 /* Components instances */
@@ -101,7 +103,6 @@ sensors_t sensors;
 debounce_t button;
 
 /* RTOS data */
-os_thread_t activator_handle;
 os_queue_t manager_queue;
 
 /* FSM data */
@@ -118,6 +119,9 @@ void setup()
     /* Initialize serial monitor */
     Serial.begin();
 
+    /**/
+    pinMode(D7, OUTPUT);
+
     /* Initialize componentes instances */
     sensors_init(&sensors, DHT_PIN);
     debounce_init(&button, button_callback, BUTTON_PIN, 1);
@@ -127,9 +131,10 @@ void setup()
 
     /* Initialize RTOS functionalities */
     os_thread_create(NULL, "Sensors Task", OS_THREAD_PRIORITY_DEFAULT + 1, app_sensors, (void *)&sensors, OS_THREAD_STACK_SIZE_DEFAULT);
-    os_thread_create(&activator_handle, "Activator Task", OS_THREAD_PRIORITY_DEFAULT + 3, app_activator, (void *)&button, OS_THREAD_STACK_SIZE_DEFAULT);
+    os_thread_create(NULL, "Activator Task", OS_THREAD_PRIORITY_DEFAULT + 3, app_activator, (void *)&button, OS_THREAD_STACK_SIZE_DEFAULT);
     os_thread_create(NULL, "Manager Task", OS_THREAD_PRIORITY_DEFAULT + 2, app_manager, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
     os_thread_create(NULL, "FSM Task", OS_THREAD_PRIORITY_DEFAULT + 4, app_fsm, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
+    os_thread_create(NULL, "Response Task", OS_THREAD_PRIORITY_DEFAULT + 5, app_response, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
 }
 
 /* infinite Loop -------------------------------------------------------------*/
@@ -185,10 +190,10 @@ static void app_manager(void * arg)
                     sensors_values_t * sensors_values = (sensors_values_t *)queue.data;
 
                     /* Print data received */
-                    Serial.print("temp: ");
-                    Serial.println(sensors_values->temp);
-                    Serial.print("hum: ");
-                    Serial.println(sensors_values->hum);
+                    // Serial.print("temp: ");
+                    // Serial.println(sensors_values->temp);
+                    // Serial.print("hum: ");
+                    // Serial.println(sensors_values->hum);
 
                     /* Add sensors values samples to buffer */
                     samples[samples_counter++] = * sensors_values;
@@ -212,11 +217,17 @@ static void app_manager(void * arg)
                         /* Prepare and send data to Ubidots */
                         ubidots.add("temp", temp_average);
                         ubidots.add("hum", hum_average);
+                        ubidots.add("state", fsm.current_state);
 
                         ubidots.send(UBIDOTS_SLAVE_LABEL);
 
                         /* Reset samples_counter variable */
                         samples_counter = 0;
+                    }
+                    else
+                    {
+                        ubidots.add("state", fsm.current_state);
+                        ubidots.send(UBIDOTS_SLAVE_LABEL);
                     }
 
                     break;
@@ -225,17 +236,42 @@ static void app_manager(void * arg)
                 case ACTIVATOR_DATA:
                 {
                     Serial.println("Button pressed!");
-                    
-                    ubidots.add("state", TRUE);
-                    ubidots.send(UBIDOTS_SLAVE_LABEL);
 
-                    os_thread_create(NULL, "Response Task", OS_THREAD_PRIORITY_DEFAULT + 4, app_response, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
-
-                    os_thread_exit(activator_handle);
+                    fsm.event = ACTIVATOR_EVENT;
 
                     break;
                 }
 
+                case RESPONSE_DATA:
+                {
+                    // const char * variables_list = "enable,alarm";
+                    // tcpMap my_map = ubidots.getMultipleValues(UBIDOTS_MASTER_LABEL, variables_list);
+
+                    // if((bool)my_map[0])
+                    //     fsm.event = ENABLE_EVENT;
+                    
+                    // if((bool)my_map[1])
+                    //     fsm.event = ALARM_EVENT;
+                    if(fsm.current_state == READY_STATE)
+                    {
+                        if((bool)ubidots.get(UBIDOTS_MASTER_LABEL, "enable"))
+                        {
+                            if(fsm.event != ENABLE_EVENT)
+                                fsm.event = ENABLE_EVENT;
+                        }
+                    }
+                    
+                    else if(fsm.current_state == RUNNING_STATE)
+                    {
+                        if((bool)ubidots.get(UBIDOTS_MASTER_LABEL, "alarm"))
+                        {
+                            if(fsm.event != ALARM_EVENT)
+                                fsm.event = ALARM_EVENT;
+                        }
+                    }
+
+                    break;
+                }
                 /* Add more cases here */
 
                 default:
@@ -276,66 +312,102 @@ static void app_activator(void * arg)
 static void app_response(void * arg)
 {
     system_tick_t last_wake_time = 0;
-    bool master_response = 0;
+    app_t queue;
+
+    /* Initialize app structure */
+    queue.data_type = RESPONSE_DATA;
+    queue.data = NULL;
+    // bool master_response = 0;
 
     for(;;)
     {
-        master_response = (bool)ubidots.get(UBIDOTS_MASTER_LABEL, "enable");
+        // master_response = (bool)ubidots.get(UBIDOTS_MASTER_LABEL, "enable");
 
-        if(master_response)
-            Serial.println("Enabled");
-        else
-            Serial.println("Disabled");
+        // if(master_response)
+        // {
+        //     Serial.println("Enabled");
+        //     fsm.event = ENABLE_EVENT;
+        // }
+        // else
+        // {
+        //     Serial.println("Disabled");
+        //     fsm.event = ALARM_EVENT;
+
+
+        // }
+
+        os_queue_put(manager_queue, &queue, 0, NULL);
 
         /* Wait for ... */
-        os_thread_delay_until(&last_wake_time, 5000);
+        os_thread_delay_until(&last_wake_time, 3000);
     }
 }
 
 static void app_fsm(void * arg)
 {
     system_tick_t last_wake_time = 0;
+    bool led_status = 0;
+    
+    fsm.current_state = INITIAL_STATE;
+            Serial.println(fsm.current_state);
 
     for(;;)
     {
         switch(fsm.current_state)
         {
+            case INITIAL_STATE:
+                fsm.next_state = STOP_STATE;
+
+                break;
+
             case STOP_STATE:
+            {
+                digitalWrite(D7, LOW);
 
                 fsm.next_state = activator_handler();
 
                 break;
+            }
 
             case READY_STATE:
+            {
+                led_status = !led_status;
+                digitalWrite(D7, led_status);
+
 
                 fsm.next_state = enable_handler();
 
                 break;
+            }
+
 
             case RUNNING_STATE:
+            {
+                digitalWrite(D7, HIGH);
 
                 fsm.next_state = alarm_handler();
 
                 break;
+            }    
             
             default:
-
-                fsm.next_state = error_handler();
+                fsm.next_state = INITIAL_STATE;
 
                 break;
         }
 
-        fsm.current_state = fsm.next_state;
+        if(fsm.next_state != fsm.current_state)
+        {
+            fsm.current_state = fsm.next_state;
+            Serial.print("State: ");
+            Serial.println(fsm.current_state);
+        }
 
-        os_thread_delay_until(&last_wake_time, 1000);   /* todo: get time with macros */
+        os_thread_delay_until(&last_wake_time, 500);   /* todo: get time with macros */
     }
 }
 
 /* Utilities */
-static void average_samples(void)  /* todo: implement */
-{
-
-}
 
 static void button_callback(void)
 {
@@ -349,7 +421,6 @@ fsm_state_e activator_handler(void)
         return READY_STATE;
 
     return STOP_STATE;
-
 }
 
 fsm_state_e enable_handler(void)
@@ -363,12 +434,7 @@ fsm_state_e enable_handler(void)
 fsm_state_e alarm_handler(void)
 {
     if(fsm.event == ALARM_EVENT)
-        return READY_STATE;
+        return STOP_STATE;
 
-    return STOP_STATE;
-}
-
-fsm_state_e error_handler(void)
-{
-    return STOP_STATE;
+    return RUNNING_STATE;
 }
