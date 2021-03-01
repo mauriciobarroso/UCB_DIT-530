@@ -37,6 +37,7 @@ void loop();
 #define POLLING_ACTIVATOR       10  /* BUtton polling time in ms */
 
 #define DHT_PIN                 A5  /* DHT sensor pin */
+#define DHT_TYPE                DHT11 /*!< DHT sensor model */
 
 /* typedef -------------------------------------------------------------------*/
 
@@ -169,7 +170,7 @@ static void app_sensors(void * arg)
     for(;;)
     {
         /* Get sensors values */
-        values = sensors_get_values(instance);
+        values = sensors_get_values(instance, DHT_TYPE);
 
         /* Send sensors values to Manager Task */
         os_queue_put(manager_queue, &queue, 0, NULL);
