@@ -21,8 +21,6 @@ extern "C" {
 
 /* macros --------------------------------------------------------------------*/
 
-#define DHT_TYPE  DHT11 /*!< DHT sensor model */
-
 /* typedef -------------------------------------------------------------------*/
 
 typedef struct
@@ -49,7 +47,7 @@ typedef struct
 /* external functions declaration --------------------------------------------*/
 
 bool sensors_init(sensors_t * const me, uint16_t dht_pin);
-sensors_values_t sensors_get_values(sensors_t * const me);
+sensors_values_t sensors_get_values(sensors_t * const me, uint8_t dht_type);
 
 /* cplusplus -----------------------------------------------------------------*/
 

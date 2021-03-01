@@ -36,10 +36,10 @@ bool sensors_init(sensors_t * const me, uint16_t dht_pin)
   return true;
 }
 
-sensors_values_t sensors_get_values(sensors_t * const me)
+sensors_values_t sensors_get_values(sensors_t * const me, uint8_t dht_type)
 {
   /* Initialize DHT instance */
-  DHT dht(me->pins.dht, DHT_TYPE);
+  DHT dht(me->pins.dht, dht_type);
 
   /* Get and verify values */
   float temp_tmp = dht.getTempCelcius();
