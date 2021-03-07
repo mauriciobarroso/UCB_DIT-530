@@ -17,17 +17,20 @@
 #include "sensors.h"
 #include "debounce.h"
 #include "Ubidots.h"
+#include "SPI.h"
+#include "MFRC522.h"
 
 /* macros --------------------------------------------------------------------*/
 
 void setup();
 void loop();
-#line 18 "/home/mauricio/ucb-iot/UCB_DIT-530/slave/src/slave.ino"
-#define GET_SENSORS_TIME        3000    /*!< */
-#define SEND_TIME               60000
+#line 20 "/home/mauricio/ucb-iot/UCB_DIT-530/slave/src/slave.ino"
+#define GET_SENSORS_TIME        2000    /*!< */
+#define SEND_TIME               10000  /*!< */
 #define SAMPLES_NUMBER          SEND_TIME / GET_SENSORS_TIME    /*!< */
 
-#define UBIDOTS_TOKEN           "BBFF-IqtgnnPsgEM8emrSyayEzf9SEPfmdP"   /*!<  */
+#define UBIDOTS_TOKEN           "BBFF-MUVazNN4vwJEcb7bCb6luadO4QbebJ"   /*!<  */
+// #define UBIDOTS_TOKEN           "BBFF-ZeutrOurg0SmDEST9togavILUEeFw1"   /*!<  */
 #define UBIDOTS_SLAVE_LABEL     "device_1"
 #define UBIDOTS_MASTER_LABEL    "master"
 
@@ -38,6 +41,9 @@ void loop();
 
 #define DHT_PIN                 A5  /* DHT sensor pin */
 #define DHT_TYPE                DHT11 /*!< DHT sensor model */
+
+#define MFRC522_RST_PIN         D9
+#define MFRC522_SS_PIN          SS
 
 /* typedef -------------------------------------------------------------------*/
 
@@ -56,7 +62,7 @@ typedef struct
     void * data;            /*!< Pointer to data */
 } app_t;
 
-/* FSM */
+/* FSM (Finite State Machine) */
 typedef enum
 {
     INITIAL_STATE = 0,
@@ -93,6 +99,8 @@ static void app_fsm(void * arg);
 
 /* Utilities */
 static void button_callback(void);
+static void dump_bytes(char * array, uint8_t size);
+boolean compareArray(byte array1[],byte array2[]);
 
 /* FSM functions */
 fsm_state_e activator_handler(void);
@@ -105,7 +113,10 @@ fsm_state_e alarm_handler(void);
 bool button_flag = 0;
 
 /* Ubidots instance */
-Ubidots ubidots(UBIDOTS_TOKEN, UBI_INDUSTRIAL, UBI_HTTP);
+Ubidots ubidots((char *)UBIDOTS_TOKEN, UBI_INDUSTRIAL, UBI_HTTP);
+
+/**/
+MFRC522 mfrc522(MFRC522_SS_PIN, MFRC522_RST_PIN);
 
 /* Components instances */
 sensors_t sensors;
@@ -116,7 +127,6 @@ os_queue_t manager_queue;
 
 /* FSM data */
 fsm_t fsm;
-
 
 /* setup ---------------------------------------------------------------------*/
 
@@ -131,12 +141,16 @@ void setup()
     /**/
     pinMode(D7, OUTPUT);
 
+    /**/
+    SPI.begin();
+    mfrc522.PCD_Init();
+
     /* Initialize componentes instances */
     sensors_init(&sensors, DHT_PIN);
     debounce_init(&button, button_callback, BUTTON_PIN, 1);
 
     /**/
-    os_queue_create(&manager_queue, sizeof(app_t), 4, NULL);
+    os_queue_create(&manager_queue, sizeof(app_t), 6, NULL);
 
     /* Initialize RTOS functionalities */
     os_thread_create(NULL, "Sensors Task", OS_THREAD_PRIORITY_DEFAULT + 1, app_sensors, (void *)&sensors, OS_THREAD_STACK_SIZE_DEFAULT);
@@ -224,19 +238,14 @@ static void app_manager(void * arg)
                         hum_average = hum_average / samples_counter;
 
                         /* Prepare and send data to Ubidots */
-                        ubidots.add("temp", temp_average);
-                        ubidots.add("hum", hum_average);
-                        ubidots.add("state", fsm.current_state);
+                        ubidots.add((char *)"temp", temp_average);
+                        ubidots.add((char *)"hum", hum_average);
+                        ubidots.add((char *)"state", fsm.current_state);
 
                         ubidots.send(UBIDOTS_SLAVE_LABEL);
 
                         /* Reset samples_counter variable */
                         samples_counter = 0;
-                    }
-                    else
-                    {
-                        ubidots.add("state", fsm.current_state);
-                        ubidots.send(UBIDOTS_SLAVE_LABEL);
                     }
 
                     break;
@@ -263,7 +272,10 @@ static void app_manager(void * arg)
                     //     fsm.event = ALARM_EVENT;
                     if(fsm.current_state == READY_STATE)
                     {
-                        if((bool)ubidots.get(UBIDOTS_MASTER_LABEL, "enable"))
+                        bool aux = (bool)ubidots.get(UBIDOTS_MASTER_LABEL, "enable");
+                        Serial.print("receive: ");
+                            Serial.println(aux);
+                        if(aux)
                         {
                             if(fsm.event != ENABLE_EVENT)
                                 fsm.event = ENABLE_EVENT;
@@ -272,7 +284,10 @@ static void app_manager(void * arg)
                     
                     else if(fsm.current_state == RUNNING_STATE)
                     {
-                        if((bool)ubidots.get(UBIDOTS_MASTER_LABEL, "alarm"))
+                        bool aux = (bool)ubidots.get(UBIDOTS_MASTER_LABEL, "alarm");
+                        Serial.print("receive: ");
+                            Serial.println(aux);
+                        if(aux)
                         {
                             if(fsm.event != ALARM_EVENT)
                                 fsm.event = ALARM_EVENT;
@@ -302,9 +317,40 @@ static void app_activator(void * arg)
     queue.data_type = ACTIVATOR_DATA;
     queue.data = NULL;
 
+    byte ActualUID[4]; //almacenará el código del Tag leído
+    byte Usuario1[4]= {0xD3, 0xFC, 0xF9, 0x24} ; //código del usuario 1
+
     for(;;)
     {
         debounce_button(instance);
+        /*  rfid function */
+        // if ( mfrc522.PICC_IsNewCardPresent()) 
+        // {  
+        //     //Seleccionamos una tarjeta
+        //     if ( mfrc522.PICC_ReadCardSerial()) 
+        //     {
+        //         // Enviamos serialemente su UID
+        //         Serial.print(F("Card UID:"));
+        //         for (byte i = 0; i < mfrc522.uid.size; i++) {
+        //                 Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+        //                 Serial.print(mfrc522.uid.uidByte[i], HEX);   
+        //                 ActualUID[i]=mfrc522.uid.uidByte[i];          
+        //         } 
+        //         Serial.print("     ");                 
+        //         //comparamos los UID para determinar si es uno de nuestros usuarios  
+        //         if(compareArray(ActualUID,Usuario1))
+        //         {
+        //             Serial.println("Acceso concedido...");
+        //             button_flag = 1;
+        //         }
+        //         else
+        //             Serial.println("Acceso denegado...");
+                
+        //         // Terminamos la lectura de la tarjeta tarjeta  actual
+        //         mfrc522.PICC_HaltA();
+        //     }
+            
+        // }
 
         /* Send sensors values to Manager Task if button_flag is 1 */
         if(button_flag)
@@ -348,7 +394,7 @@ static void app_response(void * arg)
         os_queue_put(manager_queue, &queue, 0, NULL);
 
         /* Wait for ... */
-        os_thread_delay_until(&last_wake_time, 3000);
+        os_thread_delay_until(&last_wake_time, GET_SENSORS_TIME);   /* todo: create mew macro */
     }
 }
 
@@ -421,6 +467,20 @@ static void app_fsm(void * arg)
 static void button_callback(void)
 {
     button_flag = 1;    
+}
+
+static void dump_bytes(char * array, uint8_t size)
+{
+
+}
+
+ boolean compareArray(byte array1[],byte array2[])
+{
+  if(array1[0] != array2[0])return(false);
+  if(array1[1] != array2[1])return(false);
+  if(array1[2] != array2[2])return(false);
+  if(array1[3] != array2[3])return(false);
+  return(true);
 }
 
 /* FSM functions */
