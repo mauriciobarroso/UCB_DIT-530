@@ -21,18 +21,18 @@
 #define SEND_TIME               10000  /*!< */
 #define SAMPLES_NUMBER          SEND_TIME / GET_SENSORS_TIME    /*!< */
 
-#define UBIDOTS_TOKEN           "BBFF-MUVazNN4vwJEcb7bCb6luadO4QbebJ"   /*!<  */
+#define UBIDOTS_TOKEN           "BBFF-ag03yDOWGT3tsa7domYnKEUHCgXRQd"   /*!<  */
 // #define UBIDOTS_TOKEN           "BBFF-ZeutrOurg0SmDEST9togavILUEeFw1"   /*!<  */
-#define UBIDOTS_SLAVE_LABEL     "device_1"
+#define UBIDOTS_SLAVE_LABEL     "device_2"
 #define UBIDOTS_MASTER_LABEL    "master"
 
 #define MAX_DELAY               0xFFFFFFFF                  /*!< Maximum delay value */
 
 #define BUTTON_PIN              D3  /* Button pin */
-#define POLLING_ACTIVATOR       10  /* BUtton polling time in ms */
+#define POLLING_ACTIVATOR       1000  /* BUtton polling time in ms */
 
-#define DHT_PIN                 A5  /* DHT sensor pin */
-#define DHT_TYPE                DHT11 /*!< DHT sensor model */
+#define DHT_PIN                 A3  /* DHT sensor pin */
+#define DHT_TYPE                DHT22 /*!< DHT sensor model */
 
 #define MFRC522_RST_PIN         D9
 #define MFRC522_SS_PIN          SS
@@ -116,6 +116,7 @@ debounce_t button;
 
 /* RTOS data */
 os_queue_t manager_queue;
+os_thread_t sensors_handle;
 
 /* FSM data */
 fsm_t fsm;
@@ -145,7 +146,7 @@ void setup()
     os_queue_create(&manager_queue, sizeof(app_t), 6, NULL);
 
     /* Initialize RTOS functionalities */
-    os_thread_create(NULL, "Sensors Task", OS_THREAD_PRIORITY_DEFAULT + 1, app_sensors, (void *)&sensors, OS_THREAD_STACK_SIZE_DEFAULT);
+    // os_thread_create(NULL, "Sensors Task", OS_THREAD_PRIORITY_DEFAULT + 1, app_sensors, (void *)&sensors, OS_THREAD_STACK_SIZE_DEFAULT);
     os_thread_create(NULL, "Activator Task", OS_THREAD_PRIORITY_DEFAULT + 3, app_activator, (void *)&button, OS_THREAD_STACK_SIZE_DEFAULT);
     os_thread_create(NULL, "Manager Task", OS_THREAD_PRIORITY_DEFAULT + 2, app_manager, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
     os_thread_create(NULL, "FSM Task", OS_THREAD_PRIORITY_DEFAULT + 4, app_fsm, NULL, OS_THREAD_STACK_SIZE_DEFAULT);
@@ -249,6 +250,9 @@ static void app_manager(void * arg)
 
                     fsm.event = ACTIVATOR_EVENT;
 
+                    ubidots.add((char *)"state", fsm.current_state + 1);
+                    ubidots.send(UBIDOTS_SLAVE_LABEL);
+
                     break;
                 }
 
@@ -270,7 +274,10 @@ static void app_manager(void * arg)
                         if(aux)
                         {
                             if(fsm.event != ENABLE_EVENT)
+                            {
                                 fsm.event = ENABLE_EVENT;
+                                os_thread_create(&sensors_handle, "Sensors Task", OS_THREAD_PRIORITY_DEFAULT + 1, app_sensors, (void *)&sensors, OS_THREAD_STACK_SIZE_DEFAULT);
+                            }
                         }
                     }
                     
@@ -282,7 +289,10 @@ static void app_manager(void * arg)
                         if(aux)
                         {
                             if(fsm.event != ALARM_EVENT)
+                            {
                                 fsm.event = ALARM_EVENT;
+                                os_thread_exit(sensors_handle);
+                            }
                         }
                     }
 
@@ -314,35 +324,35 @@ static void app_activator(void * arg)
 
     for(;;)
     {
-        debounce_button(instance);
+        // debounce_button(instance);
         /*  rfid function */
-        // if ( mfrc522.PICC_IsNewCardPresent()) 
-        // {  
-        //     //Seleccionamos una tarjeta
-        //     if ( mfrc522.PICC_ReadCardSerial()) 
-        //     {
-        //         // Enviamos serialemente su UID
-        //         Serial.print(F("Card UID:"));
-        //         for (byte i = 0; i < mfrc522.uid.size; i++) {
-        //                 Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
-        //                 Serial.print(mfrc522.uid.uidByte[i], HEX);   
-        //                 ActualUID[i]=mfrc522.uid.uidByte[i];          
-        //         } 
-        //         Serial.print("     ");                 
-        //         //comparamos los UID para determinar si es uno de nuestros usuarios  
-        //         if(compareArray(ActualUID,Usuario1))
-        //         {
-        //             Serial.println("Acceso concedido...");
-        //             button_flag = 1;
-        //         }
-        //         else
-        //             Serial.println("Acceso denegado...");
+        if ( mfrc522.PICC_IsNewCardPresent()) 
+        {  
+            //Seleccionamos una tarjeta
+            if ( mfrc522.PICC_ReadCardSerial()) 
+            {
+                // Enviamos serialemente su UID
+                Serial.print(F("Card UID:"));
+                for (byte i = 0; i < mfrc522.uid.size; i++) {
+                        Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
+                        Serial.print(mfrc522.uid.uidByte[i], HEX);   
+                        ActualUID[i]=mfrc522.uid.uidByte[i];          
+                } 
+                Serial.print("     ");                 
+                //comparamos los UID para determinar si es uno de nuestros usuarios  
+                if(compareArray(ActualUID,Usuario1))
+                {
+                    Serial.println("Acceso concedido...");
+                    button_flag = 1;
+                }
+                else
+                    Serial.println("Acceso denegado...");
                 
-        //         // Terminamos la lectura de la tarjeta tarjeta  actual
-        //         mfrc522.PICC_HaltA();
-        //     }
+                // Terminamos la lectura de la tarjeta tarjeta  actual
+                mfrc522.PICC_HaltA();
+            }
             
-        // }
+        }
 
         /* Send sensors values to Manager Task if button_flag is 1 */
         if(button_flag)
